@@ -187,3 +187,19 @@ def test_prefer_reference_session():
     assert low.sum() > 10 and dyn[low].mean() > 0.8, (low.sum(), dyn[low].mean())   # near-floor band rule
     walls = ~inside(chair) & ~inside(far_box) & ~inside(CABINET) & (P[:, 2] > 0.2)
     assert dyn[walls].mean() < 0.01, dyn[walls].mean()
+
+
+def test_clean_floor_flattens_and_despeckles():
+    from lidar_map_cleaner.clean_floor import tidy
+    rng = np.random.default_rng(0)
+    floor = np.c_[rng.uniform(0, 4, 40000), rng.uniform(0, 4, 40000), rng.normal(0, 0.012, 40000)]
+    speck = np.c_[rng.uniform(1.0, 1.04, 30), rng.uniform(1.0, 1.04, 30), rng.uniform(0.06, 0.09, 30)]   # tiny blob
+    g = np.arange(0.0, 0.8, 0.02)
+    leg = np.array([[2.0 + dx, 2.0 + dy, z] for z in g for dx in (0.0, 0.03) for dy in (0.0, 0.03)])     # 80 cm table leg
+    P = np.vstack([floor, speck, leg])
+    out, _, st = tidy(P, np.zeros(len(P), np.float32), np.zeros(len(P)))
+    near = lambda c, r: np.linalg.norm(out[:, :2] - np.array(c), axis=1) < r
+    assert not np.any(near((1.02, 1.02), 0.03) & (out[:, 2] > 0.05))          # speck removed
+    assert np.sum(near((2.0, 2.0), 0.05) & (out[:, 2] > 0.3)) > 50              # leg kept
+    flat = out[out[:, 2] < 0.05]
+    assert np.abs(flat[:, 2]).max() < 1e-9 and len(flat) > 4000                  # even floor kept

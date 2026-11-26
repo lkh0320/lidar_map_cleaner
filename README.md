@@ -18,6 +18,7 @@ disappears from the elevation map, and the layers use the final, loop-closed key
 | `dynamic_filter` | ROS 2 node (online) | Removes points that **appeared in previously free space** from each incoming scan. Feed its output to your mapping back-end (OctoMap, PGO, ...). ~7–14 ms per VLP-16 scan on a laptop CPU. |
 | `remove_dynamic` | CLI (offline) | Removes moving objects from a saved keyframe map with a visibility ("seen-through") test over all keyframes. |
 | `build_layers` | CLI (offline) | Rebuilds `octomap.bt`, a Nav2 `grid.pgm/yaml` and an elevation map from the keyframes, **without** moving objects and **at loop-closed poses**. |
+| `clean_floor` | CLI (offline) | Final touch for `map.pcd`: flattens the floor (LiDAR ring patterns, caster wheels, shoe soles disappear) and removes small isolated leftovers. |
 | `merge_maps` | CLI (offline) | Merges two mapping sessions of the same place: global 2D alignment (no initial guess) + point-to-plane ICP, optional floor levelling. |
 | `elevation_mapper` | ROS 2 node | 2.5D elevation map (`grid_map_msgs/GridMap`). In `octomap` mode the floor is accumulated and obstacles come from OctoMap's ray-cleared voxels, so moving-object traces disappear online. |
 
@@ -66,6 +67,16 @@ ros2 run lidar_map_cleaner build_layers   <merged_dir> --sensor-xyz 0.125,0,0.36
 If one session is the "clean" one (e.g. you tidied chairs away before recording it), make it the reference with
 `--prefer a_` on both commands: its points are judged only by its own keyframes, points of the other session are removed
 where the reference saw free space, and kept where the reference never looked (they fill its gaps).
+
+Optional final touch for the point-cloud map (keeps `map_before_floor.pcd`):
+
+```bash
+ros2 run lidar_map_cleaner clean_floor <map_dir>      # --floor-height 0.05 --cell 0.05 --despeckle 20
+```
+
+Points less than 5 cm above the local floor are replaced by an even floor (one point per 5 cm cell); then, with the floor
+noise gone, 5 cm voxel clusters of at most 20 voxels below 0.5 m are removed. Objects lower than 5 cm (cables, door
+thresholds) merge into the floor. Use a smaller `--cell` for a denser floor.
 
 `build_layers` starts its own `octomap_server` and `elevation_mapper` in a private ROS domain (localhost), so it
 can run on a robot while the robot stack is up.
