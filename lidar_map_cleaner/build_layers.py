@@ -196,17 +196,37 @@ def save_octomap(out):
     raise RuntimeError((p.stderr or p.stdout).strip().splitlines()[-1] if (p.stderr or p.stdout) else 'octomap save failed')
 
 
-def save_voxels(P, floor, out, size=0.1, top=2.0, ply=False, min_points=2):
-    """voxel centres of the static map coloured by height above the floor (blue 0 m .. red `top` m)"""
-    k = np.floor(P / size).astype(np.int64)
-    uk, inv, cnt = np.unique(k, axis=0, return_inverse=True, return_counts=True)
+def save_voxels(P, floor, out, size=0.1, top=2.0, ply=False, min_points=2, obj=0.06):
+    """voxels of the static map coloured by height above the floor (blue 0 m .. red `top` m).
+
+    Layers follow the local floor (layer 0 = floor +-size/2), so floor noise does not spill into the layer above.
+    A low voxel (layer 1) with nothing above it is kept only if its column is an obstacle by the elevation rule
+    (at least max(3, 10 %) of the column's points more than `obj` above the floor); otherwise it is floor noise / a ring
+    pattern and dropped.
+    """
+    rel = P[:, 2] - floor
+    kxy = np.floor(P[:, :2] / size).astype(np.int64)
+    kz = np.round(rel / size).astype(np.int64)
+    uk, inv, cnt = np.unique(np.c_[kxy, kz], axis=0, return_inverse=True, return_counts=True)
     inv = inv.ravel()
     fl = np.bincount(inv, weights=floor) / cnt
     keep = cnt >= min_points
-    c = (uk[keep] + 0.5) * size
-    rgb = height_colors(c[:, 2] - fl[keep], 0.0, top)
+    # column statistics
+    ucol, cinv = np.unique(kxy, axis=0, return_inverse=True)
+    cinv = cinv.ravel()
+    ccnt = np.bincount(cinv)
+    up = np.bincount(cinv, weights=(rel > obj).astype(float), minlength=len(ucol))
+    col_obj = up >= np.maximum(3, 0.1 * ccnt)
+    vcol = np.zeros(len(uk), np.int64)
+    vcol[inv] = cinv
+    has_above = np.zeros(len(ucol), bool)
+    has_above[vcol[keep & (uk[:, 2] >= 2)]] = True
+    noise = keep & (uk[:, 2] == 1) & ~has_above[vcol] & ~col_obj[vcol]
+    keep &= ~noise
+    c = np.c_[(uk[keep, :2] + 0.5) * size, fl[keep] + uk[keep, 2] * size]
+    rgb = height_colors(uk[keep, 2] * size, 0.0, top)
     write_pcd_rgb(os.path.join(out, 'voxels.pcd'), c, rgb)
-    msg = f'{len(c)} voxels of {size} m, coloured 0..{top} m above the floor'
+    msg = f'{len(c)} voxels of {size} m ({int(noise.sum())} floor bumps dropped), coloured 0..{top} m above the floor'
     if ply:
         write_voxel_ply(os.path.join(out, 'voxels.ply'), c, size * 0.98, rgb)
         msg += ' (+ voxels.ply)'
@@ -344,13 +364,19 @@ def main(argv=None):
         Ps = P[st]
         floor = local_floor(Ps, kf.t)
 
+        ev = {}
+
         def evidence():
-            # final point-cloud map (after clean_floor if it was run) decides which small grid blobs are real
-            mp = os.path.join(d, 'map.pcd')
-            if os.path.isfile(mp):
-                Q, _ = read_pcd(mp)
-                return Q, local_floor(Q, kf.t)
-            return Ps, floor
+            # final point-cloud map (after clean_floor if it was run): decides which small grid blobs are real and
+            # is what voxels.pcd shows
+            if not ev:
+                mp = os.path.join(d, 'map.pcd')
+                if os.path.isfile(mp):
+                    Q, _ = read_pcd(mp)
+                    ev['v'] = (Q, local_floor(Q, kf.t))
+                else:
+                    ev['v'] = (Ps, floor)
+            return ev['v']
 
         def elevation():
             layers, x0, y0 = robust_elevation(
@@ -362,7 +388,7 @@ def main(argv=None):
                          ('grid.pgm/yaml', lambda: save_grid(got['grid'], d, *evidence(),
                                                              (a.grid_despeckle, a.grid_min_points))),
                          ('elevation (+ elevation.png)', elevation),
-                         ('voxels.pcd', lambda: save_voxels(Ps, floor, d, a.voxel_size, a.voxel_color_max,
+                         ('voxels.pcd', lambda: save_voxels(*evidence(), d, a.voxel_size, a.voxel_color_max,
                                                             a.voxel_ply))):
             try:
                 print(f'  [OK] {name}: {fn()}')

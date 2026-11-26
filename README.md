@@ -86,7 +86,8 @@ wheels and shoe soles remain, is emptied; then 5 cm voxel clusters of at most 20
 thresholds) lose their top or merge into the floor.
 
 `build_layers` outputs: `elevation.png` (turbo colormap, blue = low, red = high, transparent = no data) next to
-`elevation.npz/pgm/yaml`, and `voxels.pcd` — the static map as 10 cm voxel centres coloured by height above the floor
+`elevation.npz/pgm/yaml`, and `voxels.pcd` — the final `map.pcd` as 10 cm voxel centres (layers follow the local floor;
+lone voxels just above the floor that fail the elevation obstacle rule are dropped) coloured by height above the floor
 (`pcl_viewer -ps 6 voxels.pcd`, RViz or CloudCompare). `--voxel-ply` also writes `voxels.ply`, the same voxels as
 coloured cubes (MeshLab / CloudCompare / Blender). `--voxel-size` and `--voxel-color-max` (height shown red) adjust them.
 
