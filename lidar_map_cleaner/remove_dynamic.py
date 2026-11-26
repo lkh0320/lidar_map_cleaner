@@ -8,6 +8,11 @@ the voxel ("seen-through") more often than it hit it, the voxel was empty at tha
 Only the band [floor + floor_margin, floor + max_height] is judged, where floor = z of the horizontally nearest
 keyframe (body frame should be on the ground, e.g. base_footprint). Grazing floor/ceiling returns cause
 false see-throughs, so they are never removed. Objects never re-observed from another viewpoint cannot be judged.
+
+Merged multi-session maps (merge_maps names keyframes a_* / b_*): --prefer a makes session A the reference.
+  - A's points are judged with A's keyframes only (only A's own moving objects are removed)
+  - other points are removed when A saw their place as free (e.g. chairs that were tidied away before recording A)
+    or by the normal all-keyframe test; where A never looked they are kept, so B fills A's gaps.
 """
 import argparse
 import os
@@ -30,6 +35,9 @@ def add_args(ap):
     ap.add_argument('--min-see', type=int, default=3, help='min number of see-through observations')
     ap.add_argument('--ratio', type=float, default=0.6, help='see / (see + hit) needed to call a voxel dynamic')
     ap.add_argument('--voxel', type=float, default=0.1)
+    ap.add_argument('--prefer', default=None, help='keyframe name prefix of the reference session (e.g. a) in a merged map')
+    ap.add_argument('--prefer-min-see', type=int, default=2, help='see-throughs by the reference session to remove other points')
+    ap.add_argument('--prefer-ratio', type=float, default=0.5)
 
 
 def sensor_from_args(a):
@@ -55,7 +63,14 @@ def classify(kf: Keyframes, sensor: SensorModel, a, log=print):
     origins, floor = np.array(origins), np.array(floor)
     log(f'{len(kf)} keyframes, {len(P)} points')
 
-    vkey = np.floor(P / a.voxel).astype(np.int64)
+    prefer = getattr(a, 'prefer', None)
+    ref_kf = np.array([n.startswith(prefer) for n in kf.names]) if prefer else np.zeros(len(kf), bool)
+    if prefer:
+        log(f'reference session "{prefer}*": {ref_kf.sum()} of {len(kf)} keyframes')
+        if not ref_kf.any():
+            raise ValueError(f'no keyframe name starts with "{prefer}"')
+    G = ref_kf[K]                              # point comes from the reference session
+    vkey = np.c_[np.floor(P / a.voxel).astype(np.int64), G]     # voxels per session
     _, vid, vinv = np.unique(vkey, axis=0, return_index=True, return_inverse=True)
     vinv = vinv.ravel()
     V = P[vid]
@@ -65,8 +80,11 @@ def classify(kf: Keyframes, sensor: SensorModel, a, log=print):
     Vc = V[cand]
     log(f'{len(V)} voxels, {len(Vc)} in the judged height band')
 
+    Gc = G[vid][cand]
     see = np.zeros(len(Vc), np.int32)
     hit = np.zeros(len(Vc), np.int32)
+    see_r = np.zeros(len(Vc), np.int32)        # evidence from reference-session keyframes only
+    hit_r = np.zeros(len(Vc), np.int32)
     tree = cKDTree(Vc)
     for k in range(len(kf)):
         idx = np.array(tree.query_ball_point(origins[k], a.max_range), dtype=np.int64)
@@ -77,9 +95,20 @@ def classify(kf: Keyframes, sensor: SensorModel, a, log=print):
         rs = np.where(ok, imgs[k][row, col], np.inf)
         valid = ok & np.isfinite(rs)
         m = 0.15 + 0.02 * r
-        see[idx[valid & (rs > r + m)]] += 1
-        hit[idx[valid & (np.abs(rs - r) <= m)]] += 1
-    dyn_c = (see >= a.min_see) & (see >= a.ratio * (see + hit))
+        s_, h_ = idx[valid & (rs > r + m)], idx[valid & (np.abs(rs - r) <= m)]
+        see[s_] += 1
+        hit[h_] += 1
+        if ref_kf[k]:
+            see_r[s_] += 1
+            hit_r[h_] += 1
+    if prefer:
+        own = (see_r >= a.min_see) & (see_r >= a.ratio * (see_r + hit_r))
+        by_ref = (see_r >= a.prefer_min_see) & (see_r >= a.prefer_ratio * (see_r + hit_r))
+        normal = (see >= a.min_see) & (see >= a.ratio * (see + hit))
+        dyn_c = np.where(Gc, own, by_ref | normal)
+        log(f'other-session voxels removed because the reference saw free space: {int((by_ref & ~Gc).sum())}')
+    else:
+        dyn_c = (see >= a.min_see) & (see >= a.ratio * (see + hit))
     dyn_v = np.zeros(len(V), bool)
     dyn_v[np.nonzero(cand)[0][dyn_c]] = True
     dyn = dyn_v[vinv]

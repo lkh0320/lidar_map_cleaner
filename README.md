@@ -63,6 +63,10 @@ ros2 run lidar_map_cleaner remove_dynamic <merged_dir> --sensor-xyz 0.125,0,0.36
 ros2 run lidar_map_cleaner build_layers   <merged_dir> --sensor-xyz 0.125,0,0.368
 ```
 
+If one session is the "clean" one (e.g. you tidied chairs away before recording it), make it the reference with
+`--prefer a_` on both commands: its points are judged only by its own keyframes, points of the other session are removed
+where the reference saw free space, and kept where the reference never looked (they fill its gaps).
+
 `build_layers` starts its own `octomap_server` and `elevation_mapper` in a private ROS domain (localhost), so it
 can run on a robot while the robot stack is up.
 
@@ -101,6 +105,7 @@ translation per angle comes from FFT cross-correlation, so no initial guess is n
 6-DoF point-to-plane ICP. If a session started with a wrong gravity estimate, the whole map is tilted; a plane through
 all (ground-level) keyframe positions is levelled to z = 0. On the merged map, `remove_dynamic` also removes objects
 that **moved between sessions** (chairs, doors), which is usually what you want for a localization map.
+With `--prefer <prefix>` one session is authoritative and the other only fills the places it did not observe.
 
 ## Results (honest numbers)
 
