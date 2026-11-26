@@ -1,0 +1,26 @@
+# dynamic_filter parameters (defaults tuned on a VLP-16 ground robot indoors, see README "Results")
+dynamic_filter:
+  ros__parameters:
+    sensor:
+      preset: vlp16           # vlp16 | os1_64 | os1_128 | hesai_xt32 | vlp32c_uniform_approx
+      xyz: [0.0, 0.0, 0.0]    # LiDAR position in the body frame of the input cloud (m)
+      rpy: [0.0, 0.0, 0.0]    # LiDAR orientation in the body frame (rad)
+      az_res: 1.0
+      el_tol: 0.3
+    window: 2.5               # seconds of past scans kept
+    min_age: 0.3              # ignore scans younger than this
+    n_past: 8                 # past scans compared per new scan
+    min_votes: 2              # see-through observations needed
+    min_ratio: 0.7            # see / (see + hit)
+    min_height: 0.15          # judged height band in the body frame (ground-level body frame recommended)
+    max_height: 2.2
+    min_range: 0.5
+    max_range: 15.0
+    erode_cols: 1
+    margin: 0.15              # + 2 % of range
+    voxel: 0.3
+    min_cluster: 3
+    track_time: 1.0
+    persist_scans: 30         # static protection (0 = off)
+    persist_time: 3.0
+    sync_slop: 0.02

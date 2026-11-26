@@ -1,0 +1,18 @@
+# elevation_mapper parameters
+elevation_mapper:
+  ros__parameters:
+    source: octomap           # octomap: floor accumulated, obstacles from octomap (moving-object traces cleared) | cloud
+    octomap_topic: /octomap_point_cloud_centers
+    cloud_topic: /cloud_in
+    floor_split: 0.15         # octomap mode: below robot floor + this = floor
+    map_frame: map
+    robot_frame: base_footprint
+    resolution: 0.1
+    length_x: 40.0            # fixed-size grid centred on the map origin (m)
+    length_y: 40.0
+    max_range: 15.0           # horizontal distance from the robot
+    max_height_above_robot: 1.2
+    min_height_above_robot: -1.5
+    min_points: 2             # cloud mode: points needed before a cell is shown
+    publish_rate: 2.0
+    tf_wait: 1.0

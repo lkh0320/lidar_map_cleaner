@@ -1,0 +1,23 @@
+# octomap_server parameters used by build_layers (and usable online)
+octomap_server:
+  ros__parameters:
+    frame_id: map
+    resolution: 0.1
+    sensor_model:
+      max_range: 15.0       # beams longer than this are not ray-cast to the end
+      hit: 0.7
+      miss: 0.4
+      min: 0.12
+      max: 0.97
+    point_cloud_min_z: -1.0 # points inserted (map z)
+    point_cloud_max_z: 2.5
+    # 2D projection (projected_map): occupied voxels in this map-z band become obstacles.
+    # map z = 0 is the floor if your SLAM starts on the floor with a ground-level body frame (e.g. base_footprint).
+    occupancy_min_z: 0.15   # above floor noise
+    occupancy_max_z: 0.8    # robot height + margin
+    filter_ground_plane: false
+    filter_speckles: true
+    publish_free_space: false
+    incremental_2D_projection: false   # true yields an all-unknown projected_map with octomap_server on Jazzy
+    compress_map: true
+    latch: true             # transient_local, so the last map is available after the input stops
