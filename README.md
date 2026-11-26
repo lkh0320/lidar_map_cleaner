@@ -72,6 +72,10 @@ cells the reference never saw.
 
 `grid.pgm` is despeckled: occupied blobs of at most 12 cells (`--grid-despeckle`) with fewer than 20 supporting points in
 `map.pcd` (`--grid-min-points`) are set free. Thin real objects (table legs) are seen from many keyframes and stay.
+OctoMap's projection only counts voxels above `occupancy_min_z` (0.15 m), so low platforms, boards and door thresholds
+looked free. `build_layers` adds cells where at least max(3, 10 %) of the points lie 6 cm .. 0.8 m above the local floor
+(`--grid-step`, `--grid-top`; same support rule as the elevation map, so floor noise does not count). Voxels on cells
+the final 2D map marks free (one cell away from obstacles) are dropped, so voxels and grid agree.
 
 Optional final touch for the point-cloud map (keeps `map_before_floor.pcd`):
 

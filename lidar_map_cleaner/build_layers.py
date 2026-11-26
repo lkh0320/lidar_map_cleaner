@@ -46,7 +46,8 @@ def write_pgm(path, img):
 
 
 def prefer_grid(m_ref, m_all):
-    """overwrite m_all (OccupancyGrid, same resolution) with every known cell of m_ref -> number of cells taken"""
+    """overwrite m_all (OccupancyGrid, same resolution) with every known cell of m_ref
+    -> (number of cells taken, bool mask of those cells in m_all's image layout (row 0 = top))"""
     res = m_all.info.resolution
     ga = np.array(m_all.data, dtype=np.int8).reshape(m_all.info.height, m_all.info.width)
     gr = np.array(m_ref.data, dtype=np.int8).reshape(m_ref.info.height, m_ref.info.width)
@@ -58,10 +59,31 @@ def prefer_grid(m_ref, m_all):
     known = sub >= 0
     ga[r0:r1, c0:c1][known] = sub[known]
     m_all.data = ga.ravel().tolist()
-    return int(known.sum())
+    mask = np.zeros(ga.shape, bool)
+    mask[r0:r1, c0:c1] = known
+    return int(known.sum()), mask[::-1]
 
 
-def save_grid(m, out, P=None, floor=None, despeckle=(12, 20)):
+def point_obstacles(shape, res, origin, P, floor, step=0.06, top=0.8, min_frac=0.1):
+    """grid cells (image layout, row 0 = top) the robot cannot drive over, judged from the points.
+
+    OctoMap's projection only counts voxels above a fixed height (occupancy_min_z), so low platforms, boards and door
+    thresholds below it look free. Here a cell is an obstacle when at least max(3, min_frac of the cell's points) lie
+    between floor + `step` and floor + `top` (same support rule as the elevation map, so floor noise does not count).
+    """
+    h, w = shape
+    rel = P[:, 2] - floor
+    col = np.floor((P[:, 0] - origin[0]) / res).astype(np.int64)
+    row = h - 1 - np.floor((P[:, 1] - origin[1]) / res).astype(np.int64)
+    ok = (col >= 0) & (col < w) & (row >= 0) & (row < h) & (rel > -0.3) & (rel < top)
+    cell = row[ok] * w + col[ok]
+    cnt = np.bincount(cell, minlength=h * w)
+    up = np.bincount(cell, weights=(rel[ok] > step).astype(float), minlength=h * w)
+    return (up >= np.maximum(3, min_frac * cnt)).reshape(shape)
+
+
+def save_grid(m, out, P=None, floor=None, despeckle=(12, 20), extra=None):
+    """extra: callable (shape, res, origin) -> bool mask of additional obstacle cells (image layout)"""
     g = np.array(m.data, dtype=np.int16).reshape(m.info.height, m.info.width)
     img = np.full(g.shape, 205, np.uint8)
     img[g == 0] = 254
@@ -71,13 +93,29 @@ def save_grid(m, out, P=None, floor=None, despeckle=(12, 20)):
     freed = 0
     if P is not None and despeckle and despeckle[0] > 0:
         freed = despeckle_grid(img, m.info.resolution, (o.x, o.y), P, floor, *despeckle)
+    added = 0
+    if extra is not None:
+        add = extra(img.shape, m.info.resolution, (o.x, o.y)) & (img != 0)
+        # tiny isolated additions (<= 3 cells, not touching an existing obstacle) are more likely noise than a platform
+        from scipy import ndimage
+        lab, n = ndimage.label(add | (img == 0), np.ones((3, 3)))
+        if n:
+            idx = np.arange(1, n + 1)
+            size = ndimage.sum(np.ones(img.shape), lab, idx)
+            had_occ = ndimage.maximum(img == 0, lab, idx)
+            tiny = np.zeros(n + 1, bool)
+            tiny[1:] = (size <= 3) & ~had_occ.astype(bool)
+            add &= ~tiny[lab]
+        img[add] = 0
+        added = int(add.sum())
     write_pgm(os.path.join(out, 'grid.pgm'), img)
     yaw = float(np.arctan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z)))
     with open(os.path.join(out, 'grid.yaml'), 'w') as f:
         f.write(f'image: grid.pgm\nmode: trinary\nresolution: {m.info.resolution}\n'
                 f'origin: [{o.x}, {o.y}, {yaw}]\nnegate: 0\noccupied_thresh: 0.65\nfree_thresh: 0.25\n')
     return (f'{m.info.width}x{m.info.height} @ {m.info.resolution:.2f} m, {int((img == 0).sum())} occupied cells'
-            + (f' ({freed} speck cells freed)' if freed else ''))
+            + (f' ({freed} speck cells freed)' if freed else '')
+            + (f' ({added} low-obstacle cells added from points)' if added else ''))
 
 
 def despeckle_grid(img, res, origin, P, floor, max_cells=12, min_points=20, band=(0.1, 2.0)):
@@ -287,6 +325,10 @@ def main(argv=None):
     ap.add_argument('--grid-despeckle', type=int, default=12,
                     help='free occupied blobs of at most this many cells that map.pcd does not support; 0 = off')
     ap.add_argument('--grid-min-points', type=int, default=20, help='map points needed to keep such a blob')
+    ap.add_argument('--grid-step', type=float, default=0.06,
+                    help='cells with enough points this far above the floor are obstacles in grid.pgm (low platforms, '
+                         'thresholds); 0 = octomap only')
+    ap.add_argument('--grid-top', type=float, default=0.8, help='... up to this height (robot height + margin)')
     ap.add_argument('--voxel-size', type=float, default=0.1, help='voxels.pcd cube size (m)')
     ap.add_argument('--voxel-color-max', type=float, default=2.0, help='height above floor shown red in voxels (m)')
     ap.add_argument('--voxel-ply', action='store_true', help='also write voxels.ply (coloured cube mesh)')
@@ -391,7 +433,7 @@ def main(argv=None):
             rclpy.spin_once(node, timeout_sec=0.1)
 
         if got.get('grid_ref') is not None and 'grid' in got:
-            n_ref = prefer_grid(got['grid_ref'], got['grid'])
+            n_ref, got['ref_known'] = prefer_grid(got['grid_ref'], got['grid'])
             print(f'2D: {n_ref} cells from the reference session, the rest from the other session', flush=True)
         old = os.path.join(d, 'layers_old')
         os.makedirs(old, exist_ok=True)
@@ -402,6 +444,19 @@ def main(argv=None):
         st = ~dyn
         Ps = P[st]
         floor = local_floor(Ps, kf.t)
+        ref_pt = ref[K[st]]
+
+        def low_obstacles(shape, res, origin):
+            if a.grid_step <= 0:
+                return np.zeros(shape, bool)
+            f = lambda sel: point_obstacles(shape, res, origin, Ps[sel], floor[sel], a.grid_step, a.grid_top)  # noqa: E731
+            if not a.prefer:
+                return f(np.ones(len(Ps), bool))
+            known = got.get('ref_known')
+            other = f(~ref_pt)
+            if known is not None and known.shape == shape:
+                other &= ~known                      # the other session only where the reference saw nothing
+            return f(ref_pt) | other
 
         ev = {}
 
@@ -425,7 +480,8 @@ def main(argv=None):
             return save_elevation_layers(layers, float(ep.get('resolution', 0.1)), x0, y0, 'map', d)
         for name, fn in (('octomap.bt', lambda: save_octomap(d)),
                          ('grid.pgm/yaml', lambda: save_grid(got['grid'], d, *evidence(),
-                                                             (a.grid_despeckle, a.grid_min_points))),
+                                                             (a.grid_despeckle, a.grid_min_points),
+                                                             low_obstacles)),
                          ('elevation (+ elevation.png)', elevation),
                          ('voxels.pcd', lambda: save_voxels(*evidence(), d, a.voxel_size, a.voxel_color_max,
                                                             a.voxel_ply))):
