@@ -15,9 +15,8 @@ Compared with layers accumulated live during SLAM:
   - keyframes are inserted at their *final* (loop-closed) poses, so loop closures are reflected
   - points classified as dynamic (remove_dynamic) are left out
   - rays start at the LiDAR origin (not the robot base)
-The elevation map is computed directly from the static points: a cell is an obstacle (highest point) only when enough
-of its points stand clearly above the local floor, otherwise it is floor (median height of its floor points), so LiDAR
-noise and ring patterns do not make a flat floor blotchy.
+The elevation map is built from the cleaned voxels (default) so elevation, voxels.pcd and grid.pgm agree;
+--elevation-from points uses the per-cell robust rule on the static points (floor = median, obstacle = highest point).
 octomap_server is started in a private ROS domain (localhost only), so this can run next to a live robot stack.
 """
 import argparse
@@ -253,7 +252,35 @@ def load_grid(d):
         return None
 
 
-def save_voxels(P, floor, out, size=0.1, top=2.0, ply=False, min_points=2, obj=0.06, grid_top=0.8):
+def elevation_from_voxels(centers, layer, size, res=0.1, length_x=40.0, length_y=40.0, max_h=1.2, min_h=-1.5):
+    """2.5D elevation from the cleaned voxels (image layout: row 0 = +y end, col 0 = x0), so elevation, voxels and
+    grid agree: elevation = centre height of the highest voxel below `max_h` above the floor, min = lowest voxel,
+    count = number of voxels in the column. The grid is centred on the origin with an even number of cells, so
+    0.1 m cells line up with the 0.1 m voxels."""
+    h = layer * size
+    sel = (h < max_h) & (h > min_h)
+    c, z = centers[sel], centers[sel, 2]
+    if len(c):
+        length_x = max(length_x, 2 * np.abs(c[:, 0]).max() + 2 * res)
+        length_y = max(length_y, 2 * np.abs(c[:, 1]).max() + 2 * res)
+    nx, ny = 2 * int(np.ceil(length_x / res / 2)), 2 * int(np.ceil(length_y / res / 2))
+    x0, y0 = -nx * res / 2, -ny * res / 2
+    col = np.floor((c[:, 0] - x0) / res).astype(np.int64)
+    row = np.floor((y0 + ny * res - c[:, 1]) / res).astype(np.int64)
+    ok = (col >= 0) & (col < nx) & (row >= 0) & (row < ny)
+    cell, z = row[ok] * nx + col[ok], z[ok]
+    N = nx * ny
+    zmax = np.full(N, np.nan)
+    np.fmax.at(zmax, cell, z)
+    zmin = np.full(N, np.nan)
+    np.fmin.at(zmin, cell, z)
+    cnt = np.bincount(cell, minlength=N).astype(np.float32)
+    shape = (ny, nx)
+    return dict(elevation=zmax.reshape(shape).astype(np.float32), min=zmin.reshape(shape).astype(np.float32),
+                count=np.where(cnt > 0, cnt, np.nan).reshape(shape)), x0, y0
+
+
+def save_voxels(P, floor, out, size=0.1, top=2.0, ply=False, min_points=2, obj=0.06, grid_top=0.8, result=None):
     """voxels of the static map coloured by height above the floor (blue 0 m .. red `top` m).
 
     Layers follow the local floor (layer 0 = floor +-size/2), so floor noise does not spill into the layer above.
@@ -302,6 +329,8 @@ def save_voxels(P, floor, out, size=0.1, top=2.0, ply=False, min_points=2, obj=0
     c = np.c_[(uk[keep, :2] + 0.5) * size, fl[keep] + uk[keep, 2] * size]
     rgb = height_colors(uk[keep, 2] * size, 0.0, top)
     write_pcd_rgb(os.path.join(out, 'voxels.pcd'), c, rgb)
+    if result is not None:
+        result.update(centers=c, layer=uk[keep, 2], size=size)
     msg = (f'{len(c)} voxels of {size} m ({int(noise.sum())} floor bumps, {int(free.sum())} on free 2D cells dropped), '
            f'coloured 0..{top} m above the floor')
     if ply:
@@ -320,6 +349,9 @@ def main(argv=None):
     ap.add_argument('--elevation-config', default=None,
                     help='elevation params yaml: resolution, length_x/y, max/min_height_above_robot, min_points '
                          '(default: package config)')
+    ap.add_argument('--elevation-from', choices=['voxels', 'points'], default='voxels',
+                    help='voxels: elevation from the cleaned voxels (agrees with voxels.pcd and grid.pgm); '
+                         'points: per-cell robust rule on the static points')
     ap.add_argument('--elevation-obstacle', type=float, default=0.06,
                     help='points more than this above the local floor count as obstacle (m)')
     ap.add_argument('--grid-despeckle', type=int, default=12,
@@ -472,7 +504,16 @@ def main(argv=None):
                     ev['v'] = (Ps, floor)
             return ev['v']
 
+        vox = {}
+
         def elevation():
+            res = float(ep.get('resolution', 0.1))
+            if vox and a.elevation_from == 'voxels':
+                layers, x0, y0 = elevation_from_voxels(
+                    vox['centers'], vox['layer'], vox['size'], res, float(ep.get('length_x', 40.0)),
+                    float(ep.get('length_y', 40.0)), float(ep.get('max_height_above_robot', 1.2)),
+                    float(ep.get('min_height_above_robot', -1.5)))
+                return save_elevation_layers(layers, res, x0, y0, 'map', d) + ' (from voxels)'
             layers, x0, y0 = robust_elevation(
                 Ps, floor, float(ep.get('resolution', 0.1)), float(ep.get('length_x', 40.0)),
                 float(ep.get('length_y', 40.0)), float(ep.get('max_height_above_robot', 1.2)),
@@ -482,9 +523,9 @@ def main(argv=None):
                          ('grid.pgm/yaml', lambda: save_grid(got['grid'], d, *evidence(),
                                                              (a.grid_despeckle, a.grid_min_points),
                                                              low_obstacles)),
-                         ('elevation (+ elevation.png)', elevation),
                          ('voxels.pcd', lambda: save_voxels(*evidence(), d, a.voxel_size, a.voxel_color_max,
-                                                            a.voxel_ply))):
+                                                            a.voxel_ply, result=vox)),
+                         ('elevation (+ elevation.png)', elevation)):
             try:
                 print(f'  [OK] {name}: {fn()}')
             except Exception as e:  # noqa: BLE001

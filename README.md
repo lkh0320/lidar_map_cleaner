@@ -89,6 +89,10 @@ wheels and shoe soles remain, is emptied; then 5 cm voxel clusters of at most 20
 `--flatten` replaces everything below 5 cm by one point per 5 cm cell instead. Objects lower than 5 cm (cables, door
 thresholds) lose their top or merge into the floor.
 
+The elevation map is built from the cleaned voxels (`--elevation-from voxels`, default): highest voxel below
+1.2 m per 0.1 m cell, so elevation, voxels and grid agree. `--elevation-from points` uses the per-cell robust rule on the
+static points instead.
+
 `build_layers` outputs: `elevation.png` (turbo colormap, blue = low, red = high, transparent = no data) next to
 `elevation.npz/pgm/yaml`, and `voxels.pcd` — the final `map.pcd` as 10 cm voxel centres (layers follow the local floor;
 lone voxels just above the floor that fail the elevation obstacle rule are dropped) coloured by height above the floor
