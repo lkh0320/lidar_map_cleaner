@@ -98,9 +98,11 @@ def main(argv=None):
         print(f'wrote {a.out}')
     else:
         backup = os.path.join(a.map_dir, 'map_before_floor.pcd')
-        if not os.path.exists(backup):
-            shutil.copy(src, backup)
+        # refresh the backup when map.pcd was regenerated (e.g. by remove_dynamic --replace) after the last run
+        if not os.path.exists(backup) or os.path.getmtime(src) > os.path.getmtime(backup):
+            shutil.copy2(src, backup)
         write_pcd(src, out, out_i)
+        os.utime(backup)                                   # backup is now newer than map.pcd's source state
         print(f'wrote {src} (original in map_before_floor.pcd)')
 
 

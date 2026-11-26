@@ -209,3 +209,19 @@ def test_clean_floor():
             assert np.abs(flat[:, 2]).max() < 1e-9 and len(flat) > 4000          # even floor
         else:
             assert len(flat) > 0.9 * len(floor)                                   # recorded floor surface kept
+
+
+def test_remove_remnants():
+    from lidar_map_cleaner.remove_dynamic import remove_remnants
+    rng = np.random.default_rng(1)
+    box = lambda lo, hi, n: rng.uniform(lo, hi, (n, 3))
+    person = box((1.0, 1.0, 0.15), (1.4, 1.4, 1.7), 3000)          # already classified dynamic
+    remnant = box((1.42, 1.0, 0.03), (1.6, 1.2, 0.2), 300)          # leftover right next to it
+    standalone = box((4.0, 4.0, 0.03), (4.3, 4.3, 0.4), 600)         # a bin far from anything removed
+    wall = box((0.0, 6.0, 0.0), (6.0, 6.05, 1.0), 6000)
+    P = np.vstack([person, remnant, standalone, wall])
+    dyn = np.r_[np.ones(len(person), bool), np.zeros(len(P) - len(person), bool)]
+    out = remove_remnants(P, dyn, P[:, 2].copy(), log=lambda *_: None)
+    s = len(person)
+    assert out[s:s + len(remnant)].mean() > 0.9
+    assert not out[s + len(remnant):].any()

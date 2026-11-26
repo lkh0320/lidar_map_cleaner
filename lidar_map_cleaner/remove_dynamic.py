@@ -20,6 +20,12 @@ Near-floor band (floor + 0.04 m .. floor_margin), which the visibility test cann
   - with --prefer: other-session low points are removed where the reference session saw the floor around them but has
     no structure (> 0.08 m above floor) within 0.08 m (chair bases and floor duplicates of the other session)
   The floor height is estimated per cell from the points themselves (low percentile), not from keyframe heights.
+
+Leftovers (--no-remnants to skip): static points 3 cm .. 1 m above the floor are grouped into 26-connected 5 cm voxel
+clusters. A cluster at most 0.6 m wide and 0.5 m tall is removed when >= 30 % of its points lie within 0.15 m of
+removed points (a remnant of a person / moved object). Isolated objects that were never next to anything removed
+(bins, extinguishers, sparsely seen far structure) are kept, whatever their size. This runs inside the classification, so build_layers' 2D and
+elevation layers get it too.
 """
 import argparse
 import os
@@ -46,6 +52,7 @@ def add_args(ap):
     ap.add_argument('--prefer-min-see', type=int, default=2, help='see-throughs by the reference session to remove other points')
     ap.add_argument('--prefer-ratio', type=float, default=0.5)
     ap.add_argument('--no-low-band', action='store_true', help='do not clean the near-floor band')
+    ap.add_argument('--no-remnants', action='store_true', help='do not remove small leftover clusters')
 
 
 def sensor_from_args(a):
@@ -120,8 +127,13 @@ def classify(kf: Keyframes, sensor: SensorModel, a, log=print):
     dyn_v = np.zeros(len(V), bool)
     dyn_v[np.nonzero(cand)[0][dyn_c]] = True
     dyn = dyn_v[vinv]
+    rel = None
     if not getattr(a, 'no_low_band', False):
-        dyn = clean_low_band(P, dyn, G, kf, a, prefer, log)
+        dyn, rel = clean_low_band(P, dyn, G, kf, a, prefer, log)
+    if not getattr(a, 'no_remnants', False):
+        if rel is None:
+            rel = P[:, 2] - local_floor(P, kf.t)
+        dyn = remove_remnants(P, dyn, rel, log)
     log(f'dynamic points: {dyn.sum()} ({100 * dyn.mean():.2f} %)')
     return P, I, K, dyn
 
@@ -174,6 +186,42 @@ def clean_low_band(P, dyn, G, kf, a, prefer, log):
             n_ref = len(r)
     log(f'near-floor band: {int(feet.sum())} feet/bottom points' +
         (f', {n_ref} other-session points the reference saw as floor' if prefer else ''))
+    return out, rel
+
+
+def remove_remnants(P, dyn, rel, log, voxel=0.05, max_width=0.6, max_height=0.5, near=0.15, frac=0.3):
+    from scipy import ndimage
+    idx = np.nonzero(~dyn & (rel > 0.03) & (rel < 1.0))[0]
+    if len(idx) == 0 or not dyn.any():
+        return dyn
+    ij = np.floor(P[idx] / voxel).astype(np.int64)
+    ij -= ij.min(0)
+    occ = np.zeros(tuple(ij.max(0) + 1), bool)
+    occ[ij[:, 0], ij[:, 1], ij[:, 2]] = True
+    lab, _ = ndimage.label(occ, structure=np.ones((3, 3, 3)))
+    pl = lab[ij[:, 0], ij[:, 1], ij[:, 2]]
+    sizes = np.bincount(lab.ravel())
+    small = []
+    for k, sl in enumerate(ndimage.find_objects(lab), 1):
+        if sl is None:
+            continue
+        w = max(sl[0].stop - sl[0].start, sl[1].stop - sl[1].start) * voxel
+        if w <= max_width and (sl[2].stop - sl[2].start) * voxel <= max_height:
+            small.append(k)
+    small = np.array(small, np.int64)
+    out = dyn.copy()
+    if len(small) == 0:
+        return out
+    in_small = np.isin(pl, small)
+    d, _ = cKDTree(P[dyn]).query(P[idx[in_small]], distance_upper_bound=near, workers=-1)
+    close = np.zeros(len(sizes))
+    np.add.at(close, pl[in_small], np.isfinite(d).astype(float))
+    npts = np.bincount(pl[in_small], minlength=len(sizes)).astype(float)
+    ratio = close / np.maximum(npts, 1)
+    kill = small[ratio[small] >= frac]
+    out[idx[np.isin(pl, kill)]] = True
+    log(f'leftover clusters removed: {len(kill)} ({int(np.isin(pl, kill).sum())} points), '
+        f'kept {len(small) - len(kill)} small standalone objects')
     return out
 
 
