@@ -225,3 +225,44 @@ def test_remove_remnants():
     s = len(person)
     assert out[s:s + len(remnant)].mean() > 0.9
     assert not out[s + len(remnant):].any()
+
+
+def test_colour_outputs():
+    import zlib
+    from lidar_map_cleaner.colorize import turbo, write_png, write_pcd_rgb, write_voxel_ply
+    c = turbo(np.array([0.0, 0.5, 1.0]))
+    assert c[0, 2] > c[0, 0] and c[2, 0] > c[2, 2]                        # blue at low, red at high
+    with tempfile.TemporaryDirectory() as d:
+        img = np.zeros((3, 4, 4), np.uint8); img[1, 2] = [255, 0, 0, 255]
+        write_png(os.path.join(d, 'a.png'), img)
+        b = open(os.path.join(d, 'a.png'), 'rb').read()
+        assert b[:8] == b'\x89PNG\r\n\x1a\n'
+        raw = zlib.decompress(b[b.index(b'IDAT') + 4:b.index(b'IEND') - 8])
+        assert len(raw) == 3 * (1 + 4 * 4) and raw[1 + 17 + 8:1 + 17 + 12] == bytes([255, 0, 0, 255])
+        xyz = np.array([[0.0, 0.0, 0.0], [1.0, 2.0, 3.0]])
+        write_pcd_rgb(os.path.join(d, 'v.pcd'), xyz, np.array([[255, 0, 0], [0, 0, 255]]))
+        q, _ = read_pcd(os.path.join(d, 'v.pcd'))
+        assert np.allclose(q, xyz)
+        write_voxel_ply(os.path.join(d, 'v.ply'), xyz, 0.1, np.array([[255, 0, 0], [0, 0, 255]]))
+        head = open(os.path.join(d, 'v.ply'), 'rb').read(400)
+        assert b'element vertex 16' in head and b'element face 24' in head
+
+
+def test_robust_elevation_flat_floor():
+    from lidar_map_cleaner.build_layers import robust_elevation
+    rng = np.random.default_rng(3)
+    # 4 x 4 m floor with noise: 3 % of the points are outliers 4-8 cm high (what made the old max-based map blotchy)
+    xy = rng.uniform(-2, 2, (60000, 2))
+    z = rng.normal(0, 0.008, len(xy))
+    out = rng.random(len(xy)) < 0.03
+    z[out] += rng.uniform(0.04, 0.08, out.sum())
+    # a 0.4 m box at (1, 1)
+    bx = np.c_[rng.uniform(0.8, 1.2, (3000, 2)), rng.uniform(0, 0.4, 3000)]
+    P = np.vstack([np.c_[xy, z], bx])
+    L, x0, y0 = robust_elevation(P, np.zeros(len(P)), res=0.1, length_x=4.0, length_y=4.0)
+    e = L['elevation']
+    col = lambda x: int((x - x0) / 0.1)
+    row = lambda y: int((y0 + e.shape[0] * 0.1 - y) / 0.1)
+    assert abs(e[row(1.0), col(1.0)] - 0.4) < 0.03                           # obstacle keeps its top
+    floor = e[row(-1.0):row(-1.9), col(-1.9):col(-1.0)]                     # row index grows towards -y
+    assert floor.size > 50 and np.nanmax(floor) < 0.02                      # no blotches on the floor

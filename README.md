@@ -17,7 +17,7 @@ disappears from the elevation map, and the layers use the final, loop-closed key
 |---|---|---|
 | `dynamic_filter` | ROS 2 node (online) | Removes points that **appeared in previously free space** from each incoming scan. Feed its output to your mapping back-end (OctoMap, PGO, ...). ~7–14 ms per VLP-16 scan on a laptop CPU. |
 | `remove_dynamic` | CLI (offline) | Removes moving objects from a saved keyframe map with a visibility ("seen-through") test over all keyframes. |
-| `build_layers` | CLI (offline) | Rebuilds `octomap.bt`, a Nav2 `grid.pgm/yaml` and an elevation map from the keyframes, **without** moving objects and **at loop-closed poses**. |
+| `build_layers` | CLI (offline) | Rebuilds `octomap.bt`, a Nav2 `grid.pgm/yaml`, an elevation map (+ colour `elevation.png`) and height-coloured voxels (`voxels.pcd`, optional `voxels.ply` cube mesh) from the keyframes, **without** moving objects and **at loop-closed poses**. |
 | `clean_floor` | CLI (offline) | Final touch for `map.pcd`: removes floor-level leftovers (caster wheels, shoe soles) and small isolated clusters; keeps the recorded floor surface (`--flatten` for an even floor). |
 | `merge_maps` | CLI (offline) | Merges two mapping sessions of the same place: global 2D alignment (no initial guess) + point-to-plane ICP, optional floor levelling. |
 | `elevation_mapper` | ROS 2 node | 2.5D elevation map (`grid_map_msgs/GridMap`). In `octomap` mode the floor is accumulated and obstacles come from OctoMap's ray-cleared voxels, so moving-object traces disappear online. |
@@ -53,7 +53,7 @@ body frame. Use a ground-level body frame (e.g. `base_footprint`): only points b
 ```bash
 ros2 run lidar_map_cleaner remove_dynamic <map_dir> --sensor-xyz 0.125,0,0.368            # map_static.pcd + map_dynamic.pcd
 ros2 run lidar_map_cleaner remove_dynamic <map_dir> --sensor-xyz 0.125,0,0.368 --replace  # map.pcd <- static (map_raw.pcd kept)
-ros2 run lidar_map_cleaner build_layers   <map_dir> --sensor-xyz 0.125,0,0.368            # octomap.bt, grid.pgm/yaml, elevation.*
+ros2 run lidar_map_cleaner build_layers   <map_dir> --sensor-xyz 0.125,0,0.368            # octomap.bt, grid.pgm/yaml, elevation.*, voxels.pcd
 ```
 
 Merge two sessions (e.g. two bags recorded on different days), then clean the result:
@@ -80,8 +80,13 @@ wheels and shoe soles remain, is emptied; then 5 cm voxel clusters of at most 20
 `--flatten` replaces everything below 5 cm by one point per 5 cm cell instead. Objects lower than 5 cm (cables, door
 thresholds) lose their top or merge into the floor.
 
-`build_layers` starts its own `octomap_server` and `elevation_mapper` in a private ROS domain (localhost), so it
-can run on a robot while the robot stack is up.
+`build_layers` outputs: `elevation.png` (turbo colormap, blue = low, red = high, transparent = no data) next to
+`elevation.npz/pgm/yaml`, and `voxels.pcd` — the static map as 10 cm voxel centres coloured by height above the floor
+(`pcl_viewer -ps 6 voxels.pcd`, RViz or CloudCompare). `--voxel-ply` also writes `voxels.ply`, the same voxels as
+coloured cubes (MeshLab / CloudCompare / Blender). `--voxel-size` and `--voxel-color-max` (height shown red) adjust them.
+
+`build_layers` starts its own `octomap_server` in a private ROS domain (localhost), so it can run on a robot while the
+robot stack is up.
 
 ### Map directory format
 
@@ -113,7 +118,11 @@ are removed where the reference saw only floor (e.g. chair bases that were moved
 per cell from the points.
 
 **Layers (`build_layers`, `elevation_mapper`).** Static keyframe points are re-inserted into `octomap_server`
-from the LiDAR origin at their final poses; the 2D grid is OctoMap's projection. For elevation, OctoMap alone erases
+from the LiDAR origin at their final poses; the 2D grid is OctoMap's projection. The offline elevation map is computed
+from the static points: a cell is an obstacle (highest point) only if at least max(3, 10 %) of its points are more than
+6 cm above the local floor; otherwise its height is the median of its floor points. Taking the highest point everywhere
+makes a flat floor blotchy, because a few noisy returns or ring-pattern points 4–8 cm high are enough to lift a cell
+(on our map: floor cells more than 3 cm above their surroundings 19 % → 10 %). Online, OctoMap alone erases
 the floor (grazing beams clear floor voxels — more than half of the floor cells vanished in our tests), so the floor is
 accumulated from points and only obstacles come from OctoMap.
 
