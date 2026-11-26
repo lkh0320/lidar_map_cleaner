@@ -66,7 +66,12 @@ ros2 run lidar_map_cleaner build_layers   <merged_dir> --sensor-xyz 0.125,0,0.36
 
 If one session is the "clean" one (e.g. you tidied chairs away before recording it), make it the reference with
 `--prefer a_` on both commands: its points are judged only by its own keyframes, points of the other session are removed
-where the reference saw free space, and kept where the reference never looked (they fill its gaps).
+where the reference saw free space, and kept where the reference never looked (they fill its gaps). In `build_layers` the
+reference session is inserted first and its 2D map is kept wherever it observed a cell; the other session only fills
+cells the reference never saw.
+
+`grid.pgm` is despeckled: occupied blobs of at most 12 cells (`--grid-despeckle`) with fewer than 20 supporting points in
+`map.pcd` (`--grid-min-points`) are set free. Thin real objects (table legs) are seen from many keyframes and stay.
 
 Optional final touch for the point-cloud map (keeps `map_before_floor.pcd`):
 

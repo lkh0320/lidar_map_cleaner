@@ -31,7 +31,7 @@ import time
 import numpy as np
 
 from .colorize import height_colors, write_pcd_rgb, write_png, write_voxel_ply
-from .pcd_io import Keyframes
+from .pcd_io import Keyframes, read_pcd
 from .remove_dynamic import add_args, classify, local_floor, sensor_from_args
 
 OUT_FILES = ['octomap.bt', 'grid.pgm', 'grid.yaml', 'elevation.npz', 'elevation.pgm', 'elevation.yaml',
@@ -45,18 +45,68 @@ def write_pgm(path, img):
         f.write(np.ascontiguousarray(img, dtype=np.uint8).tobytes())
 
 
-def save_grid(m, out):
+def prefer_grid(m_ref, m_all):
+    """overwrite m_all (OccupancyGrid, same resolution) with every known cell of m_ref -> number of cells taken"""
+    res = m_all.info.resolution
+    ga = np.array(m_all.data, dtype=np.int8).reshape(m_all.info.height, m_all.info.width)
+    gr = np.array(m_ref.data, dtype=np.int8).reshape(m_ref.info.height, m_ref.info.width)
+    di = int(round((m_ref.info.origin.position.y - m_all.info.origin.position.y) / res))
+    dj = int(round((m_ref.info.origin.position.x - m_all.info.origin.position.x) / res))
+    r0, c0 = max(di, 0), max(dj, 0)
+    r1, c1 = min(di + gr.shape[0], ga.shape[0]), min(dj + gr.shape[1], ga.shape[1])
+    sub = gr[r0 - di:r1 - di, c0 - dj:c1 - dj]
+    known = sub >= 0
+    ga[r0:r1, c0:c1][known] = sub[known]
+    m_all.data = ga.ravel().tolist()
+    return int(known.sum())
+
+
+def save_grid(m, out, P=None, floor=None, despeckle=(12, 20)):
     g = np.array(m.data, dtype=np.int16).reshape(m.info.height, m.info.width)
     img = np.full(g.shape, 205, np.uint8)
     img[g == 0] = 254
     img[g >= 65] = 0
-    write_pgm(os.path.join(out, 'grid.pgm'), img[::-1])
+    img = img[::-1].copy()
     o, q = m.info.origin.position, m.info.origin.orientation
+    freed = 0
+    if P is not None and despeckle and despeckle[0] > 0:
+        freed = despeckle_grid(img, m.info.resolution, (o.x, o.y), P, floor, *despeckle)
+    write_pgm(os.path.join(out, 'grid.pgm'), img)
     yaw = float(np.arctan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z)))
     with open(os.path.join(out, 'grid.yaml'), 'w') as f:
         f.write(f'image: grid.pgm\nmode: trinary\nresolution: {m.info.resolution}\n'
                 f'origin: [{o.x}, {o.y}, {yaw}]\nnegate: 0\noccupied_thresh: 0.65\nfree_thresh: 0.25\n')
-    return f'{m.info.width}x{m.info.height} @ {m.info.resolution:.2f} m, {(g >= 65).sum()} occupied cells'
+    return (f'{m.info.width}x{m.info.height} @ {m.info.resolution:.2f} m, {int((img == 0).sum())} occupied cells'
+            + (f' ({freed} speck cells freed)' if freed else ''))
+
+
+def despeckle_grid(img, res, origin, P, floor, max_cells=12, min_points=20, band=(0.1, 2.0)):
+    """remove small occupied blobs of a grid image (row 0 = top, 0 = occupied) that the 3D map does not support.
+
+    A blob (8-connected occupied cells) of at most `max_cells` cells is set free when fewer than `min_points` map
+    points between floor + band[0] and floor + band[1] fall into its cells (octomap specks from noise / leftovers).
+    Real thin objects (table legs, poles) are seen from many keyframes and keep their points. -> number of cells freed
+    """
+    from scipy import ndimage
+    h, w = img.shape
+    rel = P[:, 2] - floor
+    s = (rel > band[0]) & (rel < band[1])
+    col = np.floor((P[s, 0] - origin[0]) / res).astype(np.int64)
+    row = h - 1 - np.floor((P[s, 1] - origin[1]) / res).astype(np.int64)
+    ok = (col >= 0) & (col < w) & (row >= 0) & (row < h)
+    cnt = np.zeros(img.shape, np.int64)
+    np.add.at(cnt, (row[ok], col[ok]), 1)
+    lab, n = ndimage.label(img == 0, np.ones((3, 3)))
+    if n == 0:
+        return 0
+    idx = np.arange(1, n + 1)
+    size = ndimage.sum(np.ones_like(cnt), lab, idx)
+    pts = ndimage.sum(cnt, lab, idx)
+    drop = np.zeros(n + 1, bool)
+    drop[1:] = (size <= max_cells) & (pts < min_points)
+    m = drop[lab]
+    img[m] = 254
+    return int(m.sum())
 
 
 def save_elevation(m, out):
@@ -175,6 +225,9 @@ def main(argv=None):
                          '(default: package config)')
     ap.add_argument('--elevation-obstacle', type=float, default=0.06,
                     help='points more than this above the local floor count as obstacle (m)')
+    ap.add_argument('--grid-despeckle', type=int, default=12,
+                    help='free occupied blobs of at most this many cells that map.pcd does not support; 0 = off')
+    ap.add_argument('--grid-min-points', type=int, default=20, help='map points needed to keep such a blob')
     ap.add_argument('--voxel-size', type=float, default=0.1, help='voxels.pcd cube size (m)')
     ap.add_argument('--voxel-color-max', type=float, default=2.0, help='height above floor shown red in voxels (m)')
     ap.add_argument('--voxel-ply', action='store_true', help='also write voxels.ply (coloured cube mesh)')
@@ -247,7 +300,14 @@ def main(argv=None):
             return 1
         spin_for(1.0)
         print(f'inserting {len(kf)} keyframes ({int((~dyn).sum())} static points)...', flush=True)
-        for k in range(len(kf)):
+        # --prefer: reference session first; its 2D map is kept wherever it observed (free or occupied), the other
+        # session only fills cells the reference never saw -> leftovers of the other session do not reach grid.pgm
+        ref = np.array([n.startswith(a.prefer) for n in kf.names]) if a.prefer else np.zeros(len(kf), bool)
+        order = list(np.nonzero(ref)[0]) + list(np.nonzero(~ref)[0])
+        for i, k in enumerate(order):
+            if a.prefer and i == ref.sum():
+                spin_for(4.0)
+                got['grid_ref'] = got.get('grid')
             R, t = kf.R[k], kf.t[k]
             R_ws, o_ws = sensor.sensor_pose_in_world(R, t)
             sel = (K == k) & ~dyn
@@ -262,8 +322,8 @@ def main(argv=None):
                                     fields=fields, is_bigendian=False, point_step=16, row_step=16 * len(ps),
                                     is_dense=True, data=arr.tobytes()))
             spin_for(1.0 / a.rate)
-            if (k + 1) % 100 == 0:
-                print(f'  {k + 1}/{len(kf)}', flush=True)
+            if (i + 1) % 100 == 0:
+                print(f'  {i + 1}/{len(kf)}', flush=True)
         # octomap re-publishes the 2D map after every insertion (latched):
         # wait a few seconds so the last message (after the final keyframe) is the one kept in `got`
         spin_for(4.0)
@@ -271,6 +331,9 @@ def main(argv=None):
         while time.time() < end and 'grid' not in got:
             rclpy.spin_once(node, timeout_sec=0.1)
 
+        if got.get('grid_ref') is not None and 'grid' in got:
+            n_ref = prefer_grid(got['grid_ref'], got['grid'])
+            print(f'2D: {n_ref} cells from the reference session, the rest from the other session', flush=True)
         old = os.path.join(d, 'layers_old')
         os.makedirs(old, exist_ok=True)
         for f in OUT_FILES:
@@ -281,6 +344,14 @@ def main(argv=None):
         Ps = P[st]
         floor = local_floor(Ps, kf.t)
 
+        def evidence():
+            # final point-cloud map (after clean_floor if it was run) decides which small grid blobs are real
+            mp = os.path.join(d, 'map.pcd')
+            if os.path.isfile(mp):
+                Q, _ = read_pcd(mp)
+                return Q, local_floor(Q, kf.t)
+            return Ps, floor
+
         def elevation():
             layers, x0, y0 = robust_elevation(
                 Ps, floor, float(ep.get('resolution', 0.1)), float(ep.get('length_x', 40.0)),
@@ -288,7 +359,8 @@ def main(argv=None):
                 float(ep.get('min_height_above_robot', -1.5)), a.elevation_obstacle, int(ep.get('min_points', 2)))
             return save_elevation_layers(layers, float(ep.get('resolution', 0.1)), x0, y0, 'map', d)
         for name, fn in (('octomap.bt', lambda: save_octomap(d)),
-                         ('grid.pgm/yaml', lambda: save_grid(got['grid'], d)),
+                         ('grid.pgm/yaml', lambda: save_grid(got['grid'], d, *evidence(),
+                                                             (a.grid_despeckle, a.grid_min_points))),
                          ('elevation (+ elevation.png)', elevation),
                          ('voxels.pcd', lambda: save_voxels(Ps, floor, d, a.voxel_size, a.voxel_color_max,
                                                             a.voxel_ply))):
