@@ -13,6 +13,13 @@ Merged multi-session maps (merge_maps names keyframes a_* / b_*): --prefer a mak
   - A's points are judged with A's keyframes only (only A's own moving objects are removed)
   - other points are removed when A saw their place as free (e.g. chairs that were tidied away before recording A)
     or by the normal all-keyframe test; where A never looked they are kept, so B fills A's gaps.
+
+Near-floor band (floor + 0.04 m .. floor_margin), which the visibility test cannot judge (--no-low-band to skip):
+  - "feet": in a 0.1 m cell whose 0.15-0.6 m part was removed entirely, the same session's low points go too
+    (feet of people, bottoms of moved objects)
+  - with --prefer: other-session low points are removed where the reference session saw the floor around them but has
+    no structure (> 0.08 m above floor) within 0.08 m (chair bases and floor duplicates of the other session)
+  The floor height is estimated per cell from the points themselves (low percentile), not from keyframe heights.
 """
 import argparse
 import os
@@ -38,6 +45,7 @@ def add_args(ap):
     ap.add_argument('--prefer', default=None, help='keyframe name prefix of the reference session (e.g. a) in a merged map')
     ap.add_argument('--prefer-min-see', type=int, default=2, help='see-throughs by the reference session to remove other points')
     ap.add_argument('--prefer-ratio', type=float, default=0.5)
+    ap.add_argument('--no-low-band', action='store_true', help='do not clean the near-floor band')
 
 
 def sensor_from_args(a):
@@ -112,8 +120,61 @@ def classify(kf: Keyframes, sensor: SensorModel, a, log=print):
     dyn_v = np.zeros(len(V), bool)
     dyn_v[np.nonzero(cand)[0][dyn_c]] = True
     dyn = dyn_v[vinv]
+    if not getattr(a, 'no_low_band', False):
+        dyn = clean_low_band(P, dyn, G, kf, a, prefer, log)
     log(f'dynamic points: {dyn.sum()} ({100 * dyn.mean():.2f} %)')
     return P, I, K, dyn
+
+
+def local_floor(P, kf_xyz, res=0.2):
+    """per-point floor height: 10th percentile of points near keyframe height in each cell, min over 3x3 cells"""
+    from scipy.ndimage import minimum_filter
+    _, nk = cKDTree(kf_xyz[:, :2]).query(P[:, :2], workers=-1)
+    near = np.abs(P[:, 2] - kf_xyz[nk, 2]) < 0.3
+    ij = np.floor(P[:, :2] / res).astype(np.int64)
+    ij -= ij.min(0)
+    shp = tuple(ij.max(0) + 1)
+    grid = np.full(shp, np.inf)
+    idx = np.nonzero(near)[0]
+    idx = idx[np.lexsort((P[idx, 2], ij[idx, 1], ij[idx, 0]))]
+    key = ij[idx, 0] * shp[1] + ij[idx, 1]
+    uk, st, cnt = np.unique(key, return_index=True, return_counts=True)
+    grid.flat[uk] = P[idx[st + (cnt * 0.1).astype(int)], 2]
+    grid = minimum_filter(grid, size=3)
+    f = grid[ij[:, 0], ij[:, 1]]
+    return np.where(np.isfinite(f), f, kf_xyz[nk, 2])
+
+
+def clean_low_band(P, dyn, G, kf, a, prefer, log):
+    from scipy.ndimage import uniform_filter
+    rel = P[:, 2] - local_floor(P, kf.t)
+    low = (rel > 0.04) & (rel < a.floor_margin) & ~dyn
+    c = np.floor(P[:, :2] / 0.1).astype(np.int64)
+    key = c[:, 0] * 2000003 + c[:, 1]
+    upper = (rel >= a.floor_margin) & (rel < 0.6)
+    feet = np.zeros(len(P), bool)
+    for g in (True, False):
+        sel = G == g
+        gone = np.setdiff1d(np.unique(key[upper & dyn & sel]), np.unique(key[upper & ~dyn & sel]))
+        feet |= low & sel & np.isin(key, gone)
+    out = dyn | feet
+    n_ref = 0
+    if prefer:
+        ref_struct = P[G & ~out & (rel > 0.08)]
+        cand = np.nonzero(low & ~G & ~feet)[0]
+        if len(ref_struct) and len(cand):
+            d, _ = cKDTree(ref_struct).query(P[cand], workers=-1)
+            ij = np.floor((P[:, :2] - P[:, :2].min(0) + 1.0) / 0.1).astype(np.int64)
+            grid = np.zeros(tuple(ij.max(0) + 4), np.float32)
+            fl = G & (np.abs(rel) < 0.03)
+            np.add.at(grid, (ij[fl, 0], ij[fl, 1]), 1.0)
+            cov = uniform_filter(grid, size=7) * 49           # reference floor points within ~0.35 m
+            r = cand[(d >= 0.08) & (cov[ij[cand, 0], ij[cand, 1]] >= 3)]
+            out[r] = True
+            n_ref = len(r)
+    log(f'near-floor band: {int(feet.sum())} feet/bottom points' +
+        (f', {n_ref} other-session points the reference saw as floor' if prefer else ''))
+    return out
 
 
 def main(argv=None):

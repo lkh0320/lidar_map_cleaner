@@ -166,6 +166,7 @@ def test_prefer_reference_session():
     """A = tidy reference session, B = older session with a chair A saw as empty, and a box A never observed"""
     chair = ((-3.0, -1.5, 0.0), (-2.5, -1.0, 0.9))       # only in B, inside A's view
     far_box = ((3.5, 1.0, 0.0), (4.3, 1.8, 1.0))         # only in B, beyond A's range -> fills A's gap
+    low_box = ((-4.2, -1.6, 0.0), (-3.8, -1.2, 0.1))     # only in B, 10 cm tall (below the visibility band), in A's view
     path_a = [(-5 + 0.2 * i, -2.5) for i in range(12)]   # A stays on the left side
     path_b = [(-3.5 + 0.25 * i, 0.5) for i in range(30)]
     a = SimpleNamespace(max_range=5.0, floor_margin=0.15, max_height=2.2, min_see=3, ratio=0.6, voxel=0.1,
@@ -173,7 +174,7 @@ def test_prefer_reference_session():
     with tempfile.TemporaryDirectory() as d:
         os.makedirs(os.path.join(d, 'patches'))
         with open(os.path.join(d, 'poses.txt'), 'w') as f:
-            for tag, path, boxes in (('a', path_a, [CABINET]), ('b', path_b, [CABINET, chair, far_box])):
+            for tag, path, boxes in (('a', path_a, [CABINET]), ('b', path_b, [CABINET, chair, far_box, low_box])):
                 for i, xy in enumerate(path):
                     write_pcd(os.path.join(d, 'patches', f'{tag}_{i}.pcd'), scan(xy, boxes))
                     f.write(f'{tag}_{i}.pcd {xy[0]} {xy[1]} 0 1 0 0 0\n')
@@ -182,5 +183,7 @@ def test_prefer_reference_session():
     assert inside(chair).sum() > 30 and inside(far_box).sum() > 30
     assert dyn[inside(chair)].mean() > 0.8, dyn[inside(chair)].mean()      # tidied away in the reference -> removed
     assert dyn[inside(far_box)].mean() < 0.1, dyn[inside(far_box)].mean()  # reference never saw it -> kept
+    low = np.all((P >= np.array(low_box[0]) - 0.03) & (P <= np.array(low_box[1]) + 0.03), 1) & (P[:, 2] > 0.04)
+    assert low.sum() > 10 and dyn[low].mean() > 0.8, (low.sum(), dyn[low].mean())   # near-floor band rule
     walls = ~inside(chair) & ~inside(far_box) & ~inside(CABINET) & (P[:, 2] > 0.2)
     assert dyn[walls].mean() < 0.01, dyn[walls].mean()

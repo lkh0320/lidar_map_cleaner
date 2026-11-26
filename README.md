@@ -94,6 +94,10 @@ some viewpoints; without this protection it was flagged as dynamic (precision 61
 **Offline (`remove_dynamic`).** Every map voxel is tested against every keyframe's range image: if beams passed
 through it more often than they hit it, it is dynamic. Only the band between floor + 0.15 m and floor + 2.2 m is
 judged (floor = height of the nearest keyframe), because grazing floor/ceiling returns produce false see-throughs.
+The near-floor band (4–15 cm), which this test cannot judge, is handled separately: low points of a cell whose upper
+part was removed entirely go too (feet, bottoms of moved objects), and with `--prefer` low points of the other session
+are removed where the reference saw only floor (e.g. chair bases that were moved). The floor height there is estimated
+per cell from the points.
 
 **Layers (`build_layers`, `elevation_mapper`).** Static keyframe points are re-inserted into `octomap_server`
 from the LiDAR origin at their final poses; the 2D grid is OctoMap's projection. For elevation, OctoMap alone erases
