@@ -196,13 +196,35 @@ def save_octomap(out):
     raise RuntimeError((p.stderr or p.stdout).strip().splitlines()[-1] if (p.stderr or p.stdout) else 'octomap save failed')
 
 
-def save_voxels(P, floor, out, size=0.1, top=2.0, ply=False, min_points=2, obj=0.06):
+def load_grid(d):
+    """grid.pgm/yaml in d -> (image row 0 = top, resolution, (x0, y0)) or None"""
+    try:
+        import yaml
+        with open(os.path.join(d, 'grid.yaml')) as f:
+            y = yaml.safe_load(f)
+        with open(os.path.join(d, y.get('image', 'grid.pgm')), 'rb') as f:
+            f.readline()
+            line = f.readline()
+            while line.startswith(b'#'):
+                line = f.readline()
+            w, h = map(int, line.split())
+            f.readline()
+            img = np.frombuffer(f.read(w * h), np.uint8).reshape(h, w)
+        return img, float(y['resolution']), (float(y['origin'][0]), float(y['origin'][1]))
+    except (OSError, KeyError, ValueError):
+        return None
+
+
+def save_voxels(P, floor, out, size=0.1, top=2.0, ply=False, min_points=2, obj=0.06, grid_top=0.8):
     """voxels of the static map coloured by height above the floor (blue 0 m .. red `top` m).
 
     Layers follow the local floor (layer 0 = floor +-size/2), so floor noise does not spill into the layer above.
     A low voxel (layer 1) with nothing above it is kept only if its column is an obstacle by the elevation rule
     (at least max(3, 10 %) of the column's points more than `obj` above the floor); otherwise it is floor noise / a ring
     pattern and dropped.
+    If grid.pgm/yaml exist in `out`, voxels between the floor layer and `grid_top` (the 2D map's height band) standing on
+    cells the 2D map marks free (and not next to an obstacle) are dropped too, so the voxels agree with the 2D map (with --prefer: the reference
+    session decides, leftovers of the other session go).
     """
     rel = P[:, 2] - floor
     kxy = np.floor(P[:, :2] / size).astype(np.int64)
@@ -223,10 +245,27 @@ def save_voxels(P, floor, out, size=0.1, top=2.0, ply=False, min_points=2, obj=0
     has_above[vcol[keep & (uk[:, 2] >= 2)]] = True
     noise = keep & (uk[:, 2] == 1) & ~has_above[vcol] & ~col_obj[vcol]
     keep &= ~noise
+    free = np.zeros(len(uk), bool)
+    g = load_grid(out)
+    if g is not None:
+        img, res, (ox, oy) = g
+        from scipy.ndimage import binary_dilation
+        # only cells at least one cell away from any obstacle: voxel and grid cells are not aligned, so the edges of
+        # walls and furniture must not be cut
+        sure_free = (img == 254) & ~binary_dilation(img == 0, np.ones((3, 3), bool))
+        cx, cy = (uk[:, 0] + 0.5) * size, (uk[:, 1] + 0.5) * size
+        col = np.floor((cx - ox) / res).astype(np.int64)
+        row = img.shape[0] - 1 - np.floor((cy - oy) / res).astype(np.int64)
+        ok = (col >= 0) & (col < img.shape[1]) & (row >= 0) & (row < img.shape[0])
+        val = np.zeros(len(uk), bool)
+        val[ok] = sure_free[row[ok], col[ok]]
+        free = keep & val & (uk[:, 2] >= 1) & (uk[:, 2] * size < grid_top)
+        keep &= ~free
     c = np.c_[(uk[keep, :2] + 0.5) * size, fl[keep] + uk[keep, 2] * size]
     rgb = height_colors(uk[keep, 2] * size, 0.0, top)
     write_pcd_rgb(os.path.join(out, 'voxels.pcd'), c, rgb)
-    msg = f'{len(c)} voxels of {size} m ({int(noise.sum())} floor bumps dropped), coloured 0..{top} m above the floor'
+    msg = (f'{len(c)} voxels of {size} m ({int(noise.sum())} floor bumps, {int(free.sum())} on free 2D cells dropped), '
+           f'coloured 0..{top} m above the floor')
     if ply:
         write_voxel_ply(os.path.join(out, 'voxels.ply'), c, size * 0.98, rgb)
         msg += ' (+ voxels.ply)'
