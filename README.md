@@ -18,6 +18,7 @@ disappears from the elevation map, and the layers use the final, loop-closed key
 | `dynamic_filter` | ROS 2 node (online) | Removes points that **appeared in previously free space** from each incoming scan. Feed its output to your mapping back-end (OctoMap, PGO, ...). ~7–14 ms per VLP-16 scan on a laptop CPU. |
 | `remove_dynamic` | CLI (offline) | Removes moving objects from a saved keyframe map with a visibility ("seen-through") test over all keyframes. |
 | `build_layers` | CLI (offline) | Rebuilds `octomap.bt`, a Nav2 `grid.pgm/yaml` and an elevation map from the keyframes, **without** moving objects and **at loop-closed poses**. |
+| `merge_maps` | CLI (offline) | Merges two mapping sessions of the same place: global 2D alignment (no initial guess) + point-to-plane ICP, optional floor levelling. |
 | `elevation_mapper` | ROS 2 node | 2.5D elevation map (`grid_map_msgs/GridMap`). In `octomap` mode the floor is accumulated and obstacles come from OctoMap's ray-cleared voxels, so moving-object traces disappear online. |
 
 ## Install
@@ -54,6 +55,14 @@ ros2 run lidar_map_cleaner remove_dynamic <map_dir> --sensor-xyz 0.125,0,0.368 -
 ros2 run lidar_map_cleaner build_layers   <map_dir> --sensor-xyz 0.125,0,0.368            # octomap.bt, grid.pgm/yaml, elevation.*
 ```
 
+Merge two sessions (e.g. two bags recorded on different days), then clean the result:
+
+```bash
+ros2 run lidar_map_cleaner merge_maps <map_A> <map_B> <merged_dir>        # B is aligned onto A, floor levelled
+ros2 run lidar_map_cleaner remove_dynamic <merged_dir> --sensor-xyz 0.125,0,0.368 --replace
+ros2 run lidar_map_cleaner build_layers   <merged_dir> --sensor-xyz 0.125,0,0.368
+```
+
 `build_layers` starts its own `octomap_server` and `elevation_mapper` in a private ROS domain (localhost), so it
 can run on a robot while the robot stack is up.
 
@@ -87,6 +96,12 @@ from the LiDAR origin at their final poses; the 2D grid is OctoMap's projection.
 the floor (grazing beams clear floor voxels — more than half of the floor cells vanished in our tests), so the floor is
 accumulated from points and only obstacles come from OctoMap.
 
+**Merging (`merge_maps`).** Wall slices of both maps become 2D occupancy images; B is rotated in 1° steps and the best
+translation per angle comes from FFT cross-correlation, so no initial guess is needed. The best candidate seeds a
+6-DoF point-to-plane ICP. If a session started with a wrong gravity estimate, the whole map is tilted; a plane through
+all (ground-level) keyframe positions is levelled to z = 0. On the merged map, `remove_dynamic` also removes objects
+that **moved between sessions** (chairs, doors), which is usually what you want for a localization map.
+
 ## Results (honest numbers)
 
 Developed and evaluated on **one robot**: 4-wheel skid-steer, Velodyne VLP-16 + 9-axis IMU, FAST-LIO2 + PGO, indoor
@@ -98,6 +113,7 @@ lab/office, an operator walking around the robot. No public benchmark yet (see R
 | `dynamic_filter` vs. offline labels | precision ~92 %, recall ~35 % per point; 2D occupied cells unchanged (5839 → 5848) |
 | `dynamic_filter` runtime | 7–14 ms per scan (Python, single core, laptop CPU; scans every 100 ms) |
 | moving-object points left in the live PGO map | 110 k → 70 k with the filter on (the rest is removed offline) |
+| `merge_maps` (two sessions, 13 h apart, ~160 s + 264 s) | 98 % of B's wall points overlap A, point-to-plane median 1.9 cm / 90 % 8.2 cm; a 1.9° start-up tilt of one session levelled |
 
 ![dynamic_filter](docs/images/dynamic_filter.png)
 *Live PGO map without (left) and with (right) `dynamic_filter`. Red: points the offline pass still had to remove.*
@@ -106,7 +122,10 @@ Recall of the online filter is limited by design: it removes things that **enter
 People who were there from the start, or who walk right next to the robot where no earlier beam looked, are left for
 the offline pass.
 
-Synthetic tests (ray-cast box room, VLP-16 model, walking person): `python3 -m pytest test/ -q`.
+![merge_maps](docs/images/merge_maps.png)
+*Two sessions merged and cleaned. Red: removed (people and objects moved between the sessions).*
+
+Synthetic tests (ray-cast box room, VLP-16 model, walking person, two sessions with a known transform and tilt): `python3 -m pytest test/ -q`.
 
 ## Limitations
 

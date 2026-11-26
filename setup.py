@@ -26,5 +26,6 @@ setup(
         'remove_dynamic = lidar_map_cleaner.remove_dynamic:main',
         'build_layers = lidar_map_cleaner.build_layers:main',
         'elevation_mapper = lidar_map_cleaner.elevation_mapper:main',
+        'merge_maps = lidar_map_cleaner.merge_maps:main',
     ]},
 )

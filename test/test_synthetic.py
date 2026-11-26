@@ -116,3 +116,47 @@ def test_pcd_roundtrip():
         write_pcd(os.path.join(d, 'a.pcd'), p, np.arange(100, dtype=np.float32))
         q, i = read_pcd(os.path.join(d, 'a.pcd'))
         assert np.allclose(p, q, atol=1e-6) and i[5] == 5
+
+
+def _write_session(d, path, boxes, T=None):
+    """write a map dir (poses.txt, patches/, map.pcd) of `path`, expressed in a frame where world = T(session)"""
+    os.makedirs(os.path.join(d, 'patches'))
+    R_s, t_s = (Rot.identity(), np.zeros(3)) if T is None else T      # session frame -> world
+    Ri, ti = R_s.inv(), -R_s.inv().apply(t_s)                          # world -> session frame
+    allp = []
+    with open(os.path.join(d, 'poses.txt'), 'w') as f:
+        for i, xy in enumerate(path):
+            pb = scan(xy, boxes)
+            write_pcd(os.path.join(d, 'patches', f'{i}.pcd'), pb)
+            pos = Ri.apply([xy[0], xy[1], 0.0]) + ti
+            q = Ri.as_quat()
+            f.write(f'{i}.pcd {pos[0]} {pos[1]} {pos[2]} {q[3]} {q[0]} {q[1]} {q[2]}\n')
+            allp.append(Ri.apply(pb + np.array([xy[0], xy[1], 0.0])) + ti)
+    write_pcd(os.path.join(d, 'map.pcd'), np.concatenate(allp))
+
+
+def test_merge_recovers_known_transform_and_levels():
+    from lidar_map_cleaner.merge_maps import main as merge_main
+    shelf = ((3.0, -4.0, 0.0), (5.0, -3.4, 1.8))                       # breaks the room's symmetry
+    boxes = [CABINET, shelf]
+    path_a = [(-4 + 0.5 * i, -1.0) for i in range(17)]
+    path_b = [(3.0, -3 + 0.5 * i) for i in range(13)] + [(3 - 0.5 * i, 2.5) for i in range(13)]
+    tilt = Rot.from_euler('y', 1.5, degrees=True)                       # session A started with a wrong gravity estimate
+    T_a = (tilt, np.zeros(3))
+    T_b = (Rot.from_euler('z', 123.0, degrees=True), np.array([1.5, -2.0, 0.0]))
+    with tempfile.TemporaryDirectory() as d:
+        A, B, out = (os.path.join(d, n) for n in ('A', 'B', 'out'))
+        _write_session(A, path_a, boxes, T_a)
+        _write_session(B, path_b, boxes, T_b)
+        assert merge_main([A, B, out]) == 0
+        kf = Keyframes(out)
+        # every keyframe must end up where it was in the (level) world, up to one global yaw/translation in the plane
+        true = np.array([[x, y, 0.0] for x, y in path_a + path_b])
+        est = kf.t
+        assert np.abs(est[:, 2]).max() < 0.03, np.abs(est[:, 2]).max()      # floor levelled to z = 0
+        ca, ce = true[:, :2].mean(0), est[:, :2].mean(0)
+        H = (est[:, :2] - ce).T @ (true[:, :2] - ca)
+        U, _, Vt = np.linalg.svd(H)
+        R2 = Vt.T @ U.T
+        err = np.linalg.norm((est[:, :2] - ce) @ R2.T + ca - true[:, :2], axis=1)
+        assert err.max() < 0.05, err.max()
